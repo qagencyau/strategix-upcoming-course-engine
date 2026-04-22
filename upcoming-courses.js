@@ -283,9 +283,37 @@
   }
 
   // ----------------------------------------------------------------------------
+  // Detach Finsweet's native date filter on #Date.
+  //
+  // Why: Finsweet's date filter removes items from the DOM entirely when they
+  // fail the operator (e.g. empty/unparseable dates under "greater-equal").
+  // That wipes out "continuous intake" items that have no date — even though
+  // the UX requires them to stay visible regardless of date filter.
+  //
+  // Our engine's wrapperMatchesDate() already handles:
+  //   - Dated items: operator-aware comparison (greater, greater-equal, etc.)
+  //   - Continuous items: passes filter (Invalid Date → returns true)
+  //
+  // So we disable Finsweet's version and let our engine be the sole authority
+  // on date filtering. Other Finsweet features (search, sort, other filters)
+  // are untouched.
+  // ----------------------------------------------------------------------------
+  function detachFinsweetDateFilter() {
+    var dateInput = document.querySelector('#Date');
+    if (!dateInput) return;
+    dateInput.removeAttribute('fs-list-field');
+    dateInput.removeAttribute('fs-list-fieldtype');
+    dateInput.removeAttribute('fs-list-operator');
+  }
+
+  // ----------------------------------------------------------------------------
   // Observer: re-run on CMS child changes (Finsweet re-render, etc.)
   // ----------------------------------------------------------------------------
   function initObserverAndListeners() {
+    // Must run BEFORE wiring anything else so Finsweet sees the clean input
+    // on its first read. Safe to call more than once; removeAttribute is idempotent.
+    detachFinsweetDateFilter();
+
     var mainObserver = new MutationObserver(function (mutations) {
       if (isExpanding) return;
       if (mutations.some(function (m) { return m.addedNodes.length > 0; })) {
