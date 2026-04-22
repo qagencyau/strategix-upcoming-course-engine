@@ -299,11 +299,22 @@
   // are untouched.
   // ----------------------------------------------------------------------------
   function detachFinsweetDateFilter() {
-    var dateInput = document.querySelector('#Date');
-    if (!dateInput) return;
-    dateInput.removeAttribute('fs-list-field');
-    dateInput.removeAttribute('fs-list-fieldtype');
-    dateInput.removeAttribute('fs-list-operator');
+    // Strip fs-list-* attributes from every INPUT that's driving the intake-date
+    // filter. There are typically two: the visible #Date-display (user types
+    // into this) and the hidden #Date (fengyuanchen pick handler writes ISO
+    // here). Both must be detached — if either retains the attributes, Finsweet
+    // will still try to filter and remove items from the DOM.
+    //
+    // The per-item CMS date divs (the <div fs-list-field="intake-date"> inside
+    // each intake) are left alone — our engine reads those for comparison.
+    var dateFilterInputs = document.querySelectorAll(
+      'input[fs-list-field="intake-date"], input[fs-list-fieldtype="date"]'
+    );
+    dateFilterInputs.forEach(function (input) {
+      input.removeAttribute('fs-list-field');
+      input.removeAttribute('fs-list-fieldtype');
+      input.removeAttribute('fs-list-operator');
+    });
   }
 
   // ----------------------------------------------------------------------------
