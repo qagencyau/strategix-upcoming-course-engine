@@ -4,7 +4,13 @@
  * Handles:
  *   1. CMS grouping & sorting of course intakes by course name/code
  *   2. Domain-based filtering (data-filter-ids attribute on main list)
- *   3. Coordination with Finsweet date filter on intake dates
+ *   3. "Continuous intake" handling (items with no intake date stay visible
+ *      regardless of the Finsweet date filter)
+ *
+ * Date filtering is owned by Finsweet — this engine does NOT duplicate it.
+ * Continuous-intake items are made visible by injecting a far-future placeholder
+ * date into their (otherwise empty) intake-date field so they always satisfy
+ * Finsweet's greater-equal comparison.
  *
  * NOT handled here (kept on-page per vendor instructions):
  *   - fengyuanchen datepicker init + visible/hidden input sync
@@ -26,6 +32,9 @@
  *       vacancy attribute:      vacancy="<number>"
  *       filter date element:    [fs-list-field="intake-date"][fs-list-fieldtype="date"]  (YYYY-MM-DD text)
  *       sort date element:      [data-sort="intake-date"]  (YYYY-MM-DD text)
+ *       continuous marker:      [data-continuous-intake]  (presence only, on the
+ *                               "Continuous intake" text label — Webflow conditional
+ *                               visibility renders it only when intake-date is empty)
  *   - Hidden course directory:  .course-directory-hidden  (name → URL lookup)
  *   - Inputs:
  *       visible datepicker:     #Date-display  (fengyuanchen, format dd-mm-yyyy)
@@ -34,8 +43,8 @@
  *   - Clear button:             [fs-list-element="clear"]
  *   - Load-more per row:        .enrol-load-more
  *
- * Repo: https://github.com/qagency/strategix-webflow
- * Version: 1.0.0 (consolidated from V13.12 + datepicker init + clear sync)
+ * Repo: https://github.com/qagencyau/strategix-upcoming-course-engine
+ * Version: 1.1.0 (continuous-intake via placeholder-date injection)
  */
 
 (function () {
@@ -283,37 +292,36 @@
   }
 
   // ----------------------------------------------------------------------------
-  // Detach Finsweet's native date filter on #Date.
+  // Patch continuous-intake items with a placeholder date so Finsweet keeps them.
   //
-  // Why: Finsweet's date filter removes items from the DOM entirely when they
-  // fail the operator (e.g. empty/unparseable dates under "greater-equal").
-  // That wipes out "continuous intake" items that have no date — even though
-  // the UX requires them to stay visible regardless of date filter.
+  // Why: Finsweet's date filter REMOVES items from the DOM entirely when their
+  // date field fails the operator. Continuous-intake items have an empty
+  // intake-date field, which fails any numeric comparison — so they get wiped.
   //
-  // Our engine's wrapperMatchesDate() already handles:
-  //   - Dated items: operator-aware comparison (greater, greater-equal, etc.)
-  //   - Continuous items: passes filter (Invalid Date → returns true)
+  // Fix: for each item marked with [data-continuous-intake], inject the sentinel
+  // date "9999-12-31" into the otherwise-empty filter date element. That value
+  // is always >= whatever the user picks, so Finsweet's greater-equal comparison
+  // always keeps these items visible. Dated items are left alone.
   //
-  // So we disable Finsweet's version and let our engine be the sole authority
-  // on date filtering. Other Finsweet features (search, sort, other filters)
-  // are untouched.
+  // This runs on DOMContentLoaded (early enough — Finsweet loads async from its
+  // CDN script) and again inside the MutationObserver in case CMS pagination
+  // adds more items later.
+  //
+  // Idempotent: if the date field already has content we don't touch it.
   // ----------------------------------------------------------------------------
-  function detachFinsweetDateFilter() {
-    // Strip fs-list-* attributes from every INPUT that's driving the intake-date
-    // filter. There are typically two: the visible #Date-display (user types
-    // into this) and the hidden #Date (fengyuanchen pick handler writes ISO
-    // here). Both must be detached — if either retains the attributes, Finsweet
-    // will still try to filter and remove items from the DOM.
-    //
-    // The per-item CMS date divs (the <div fs-list-field="intake-date"> inside
-    // each intake) are left alone — our engine reads those for comparison.
-    var dateFilterInputs = document.querySelectorAll(
-      'input[fs-list-field="intake-date"], input[fs-list-fieldtype="date"]'
-    );
-    dateFilterInputs.forEach(function (input) {
-      input.removeAttribute('fs-list-field');
-      input.removeAttribute('fs-list-fieldtype');
-      input.removeAttribute('fs-list-operator');
+  var CONTINUOUS_PLACEHOLDER_DATE = '9999-12-31';
+
+  function patchContinuousIntakes() {
+    var markers = document.querySelectorAll('[data-continuous-intake]');
+    markers.forEach(function (marker) {
+      var wrapper = marker.closest('.w-dyn-item');
+      if (!wrapper) return;
+      var dateEl = wrapper.querySelector('[fs-list-field="intake-date"][fs-list-fieldtype="date"]');
+      if (!dateEl) return;
+      // Don't overwrite real dates — only fill the empty continuous-intake fields.
+      if (dateEl.textContent.trim() === '') {
+        dateEl.textContent = CONTINUOUS_PLACEHOLDER_DATE;
+      }
     });
   }
 
@@ -321,13 +329,16 @@
   // Observer: re-run on CMS child changes (Finsweet re-render, etc.)
   // ----------------------------------------------------------------------------
   function initObserverAndListeners() {
-    // Must run BEFORE wiring anything else so Finsweet sees the clean input
-    // on its first read. Safe to call more than once; removeAttribute is idempotent.
-    detachFinsweetDateFilter();
+    // Must run BEFORE Finsweet reads the list so continuous-intake items already
+    // carry the placeholder date when Finsweet builds its index. Idempotent.
+    patchContinuousIntakes();
 
     var mainObserver = new MutationObserver(function (mutations) {
       if (isExpanding) return;
       if (mutations.some(function (m) { return m.addedNodes.length > 0; })) {
+        // Patch any newly-added continuous items (CMS pagination, etc.) before
+        // the engine re-runs.
+        patchContinuousIntakes();
         clearTimeout(globalDebounceTimer);
         globalDebounceTimer = setTimeout(applyAutomatedDataLogic, 400);
       }
@@ -371,6 +382,11 @@
       fn();
     }
   }
+
+  // Patch continuous items as early as possible (before Finsweet indexes the
+  // list). Safe to call even if DOM isn't fully parsed — querySelectorAll just
+  // returns what exists so far, and initObserverAndListeners will catch the rest.
+  patchContinuousIntakes();
 
   onReady(initObserverAndListeners);
 
