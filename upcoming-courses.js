@@ -4,13 +4,16 @@
  * Handles:
  *   1. CMS grouping & sorting of course intakes by course name/code
  *   2. Domain-based filtering (data-filter-ids attribute on main list)
- *   3. "Continuous intake" handling (items with no intake date stay visible
- *      regardless of the Finsweet date filter)
+ *   3. Date filtering on intake dates (engine-owned, not Finsweet's)
+ *   4. "Continuous intake" handling (items with no intake date always pass)
  *
- * Date filtering is owned by Finsweet — this engine does NOT duplicate it.
- * Continuous-intake items are made visible by injecting a far-future placeholder
- * date into their (otherwise empty) intake-date field so they always satisfy
- * Finsweet's greater-equal comparison.
+ * Why the engine owns date filtering (and not Finsweet): Finsweet v2 does not
+ * index fields from nested child lists as fields of the parent. The intake-date
+ * element lives inside each intake row, which is nested inside a course card.
+ * Finsweet's filter ends up trying to match a non-existent field on the parent
+ * items and removes every item from the DOM. This engine detaches Finsweet's
+ * date filter (strips fs-list-* attrs from the datepicker inputs) and compares
+ * dates per-intake-row via wrapperMatchesDate().
  *
  * NOT handled here (kept on-page per vendor instructions):
  *   - fengyuanchen datepicker init + visible/hidden input sync
@@ -52,7 +55,7 @@
 
   // Version marker — check `window.__strategixEngine` in console to confirm
   // which build the browser is actually running. Bump on every deploy.
-  window.__strategixEngine = { version: '1.1.0', loadedAt: new Date().toISOString() };
+  window.__strategixEngine = { version: '1.2.0', loadedAt: new Date().toISOString() };
 
   // ============================================================================
   // SECTION 1 — CORE COURSE LIST LOGIC
@@ -296,20 +299,13 @@
   }
 
   // ----------------------------------------------------------------------------
-  // Patch continuous-intake items with a placeholder date so Finsweet keeps them.
+  // Patch continuous-intake items with a sentinel date so sort places them last.
   //
-  // Why: Finsweet's date filter REMOVES items from the DOM entirely when their
-  // date field fails the operator. Continuous-intake items have an empty
-  // intake-date field, which fails any numeric comparison — so they get wiped.
-  //
-  // Fix: for each item marked with [data-continuous-intake], inject the sentinel
-  // date "9999-12-31" into the otherwise-empty filter date element. That value
-  // is always >= whatever the user picks, so Finsweet's greater-equal comparison
-  // always keeps these items visible. Dated items are left alone.
-  //
-  // This runs on DOMContentLoaded (early enough — Finsweet loads async from its
-  // CDN script) and again inside the MutationObserver in case CMS pagination
-  // adds more items later.
+  // Our engine's wrapperMatchesDate() will always let continuous items pass the
+  // date filter (since 9999-12-31 >= any real date under greater-equal), and the
+  // sort logic already falls back to 9999-12-31 for missing dates, so this is
+  // mostly cosmetic — but it keeps DOM state consistent with what the engine
+  // treats internally.
   //
   // Idempotent: if the date field already has content we don't touch it.
   // ----------------------------------------------------------------------------
@@ -322,7 +318,6 @@
       if (!wrapper) return;
       var dateEl = wrapper.querySelector('[fs-list-field="intake-date"][fs-list-fieldtype="date"]');
       if (!dateEl) return;
-      // Don't overwrite real dates — only fill the empty continuous-intake fields.
       if (dateEl.textContent.trim() === '') {
         dateEl.textContent = CONTINUOUS_PLACEHOLDER_DATE;
       }
@@ -330,18 +325,72 @@
   }
 
   // ----------------------------------------------------------------------------
+  // Detach Finsweet's intake-date filter and let our engine own date filtering.
+  //
+  // Why: Finsweet v2 does NOT index `intake-date` as a field on parent course
+  // items (verified via inst.allFieldsData.value — only includes name, state,
+  // qual-code, location-address, qualification-id). The field lives inside the
+  // nested intake items. When a user picks a date, Finsweet tries to match a
+  // field that doesn't exist on any item, so every item fails the filter and
+  // gets wiped from the DOM. That's how "all items disappear on filter" happens.
+  //
+  // Fix: strip fs-list-* from both #Date (hidden, ISO) and #Date-display
+  // (visible, DD-MM-YYYY) so Finsweet stops trying to apply the intake-date
+  // filter entirely. Our engine's wrapperMatchesDate() handles the comparison
+  // per-intake-row, which correctly reaches into the nested date elements.
+  //
+  // We also call Finsweet's list.restart() after detaching so any state
+  // Finsweet captured before detach gets cleared.
+  // ----------------------------------------------------------------------------
+  function detachFinsweetDateFilter() {
+    var inputs = document.querySelectorAll(
+      'input[fs-list-field="intake-date"], input[fs-list-fieldtype="date"]'
+    );
+    inputs.forEach(function (inp) {
+      inp.removeAttribute('fs-list-field');
+      inp.removeAttribute('fs-list-fieldtype');
+      inp.removeAttribute('fs-list-operator');
+    });
+  }
+
+  // Wait for Finsweet's list module to be ready, then detach + restart. Using
+  // modules.list.loading (a promise) rather than the push queue because by the
+  // time our defer script runs, FinsweetAttributes may already be the
+  // initialized object (not an array), and restart() cleanly rebuilds state.
+  function syncWithFinsweet() {
+    var fs = window.FinsweetAttributes;
+    if (fs && fs.modules && fs.modules.list && fs.modules.list.loading
+        && typeof fs.modules.list.loading.then === 'function') {
+      fs.modules.list.loading.then(function () {
+        detachFinsweetDateFilter();
+        if (typeof fs.modules.list.restart === 'function') {
+          fs.modules.list.restart();
+        }
+      });
+      return;
+    }
+    // Finsweet not loaded yet — try again shortly.
+    setTimeout(syncWithFinsweet, 150);
+  }
+
+  // ----------------------------------------------------------------------------
   // Observer: re-run on CMS child changes (Finsweet re-render, etc.)
   // ----------------------------------------------------------------------------
   function initObserverAndListeners() {
-    // Must run BEFORE Finsweet reads the list so continuous-intake items already
-    // carry the placeholder date when Finsweet builds its index. Idempotent.
+    // Detach Finsweet's intake-date filter (strips fs-list-* from inputs) and
+    // patch continuous items with the sentinel date. Both idempotent.
+    detachFinsweetDateFilter();
     patchContinuousIntakes();
+
+    // Also detach + restart once Finsweet finishes loading, to clear any filter
+    // state Finsweet captured from the inputs before we stripped them.
+    syncWithFinsweet();
 
     var mainObserver = new MutationObserver(function (mutations) {
       if (isExpanding) return;
       if (mutations.some(function (m) { return m.addedNodes.length > 0; })) {
-        // Patch any newly-added continuous items (CMS pagination, etc.) before
-        // the engine re-runs.
+        // Re-detach (Finsweet sometimes re-decorates inputs) and re-patch items.
+        detachFinsweetDateFilter();
         patchContinuousIntakes();
         clearTimeout(globalDebounceTimer);
         globalDebounceTimer = setTimeout(applyAutomatedDataLogic, 400);
@@ -387,9 +436,11 @@
     }
   }
 
-  // Patch continuous items as early as possible (before Finsweet indexes the
-  // list). Safe to call even if DOM isn't fully parsed — querySelectorAll just
-  // returns what exists so far, and initObserverAndListeners will catch the rest.
+  // Detach Finsweet's intake-date filter and patch continuous items as early as
+  // possible. Safe to call even if DOM isn't fully parsed — querySelectorAll
+  // just returns what exists so far, and initObserverAndListeners will catch
+  // the rest on DOMContentLoaded.
+  detachFinsweetDateFilter();
   patchContinuousIntakes();
 
   onReady(initObserverAndListeners);
