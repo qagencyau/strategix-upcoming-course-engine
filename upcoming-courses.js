@@ -50,6 +50,10 @@
 (function () {
   'use strict';
 
+  // Version marker — check `window.__strategixEngine` in console to confirm
+  // which build the browser is actually running. Bump on every deploy.
+  window.__strategixEngine = { version: '1.1.0', loadedAt: new Date().toISOString() };
+
   // ============================================================================
   // SECTION 1 — CORE COURSE LIST LOGIC
   // ============================================================================
